@@ -1,0 +1,2 @@
+# Logitech B525 HD Webcam -> stable /dev/webcam symlink (capture node only)
+SUBSYSTEM=="video4linux", ENV{ID_VENDOR_ID}=="046d", ENV{ID_MODEL_ID}=="0836", ATTR{index}=="0", SYMLINK+="webcam", MODE="0666"

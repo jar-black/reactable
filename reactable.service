@@ -1,0 +1,15 @@
+[Unit]
+Description=ReacTable tracker + renderer
+After=pipewire.service pipewire-pulse.service wireplumber.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/reactable
+ExecStart=%h/reactable/run.sh
+Restart=on-failure
+RestartSec=3
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=SDL_VIDEODRIVER=wayland
+
+[Install]
+WantedBy=default.target
