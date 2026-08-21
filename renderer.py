@@ -7,9 +7,16 @@ import time
 import numpy as np
 import pygame
 
+try:
+    from drums import DrumKit, VOICES
+except Exception:
+    DrumKit = None
+    VOICES = ("kick", "snare", "hihat", "clap", "tom")
+
 RPM_MIN = 30.0
 RPM_MAX = 240.0
 BEAT_MARKER_ID = 0
+SOUND_MARKER_ID = 1
 CENTER_COLOR = (60, 130, 255)
 
 
@@ -39,6 +46,10 @@ def make_kick(rate=44100, dur=0.25):
 
 def rpm_from_angle(angle):
     return RPM_MIN + (angle % 360.0) / 360.0 * (RPM_MAX - RPM_MIN)
+
+
+def sound_index(angle):
+    return int((angle % 360.0) / 360.0 * len(VOICES)) % len(VOICES)
 
 
 def draw_glow(screen, pos, rgb, radius, intensity=1.0):
@@ -77,21 +88,35 @@ def main():
         print("no homography file; using identity mapping")
         H = np.eye(3)
 
-    pygame.mixer.pre_init(44100, -16, 1, 512)
+    if args.audio:
+        pygame.mixer.pre_init(44100, -16, 1, 512)
     pygame.init()
     screen = pygame.display.set_mode((args.width, args.height), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
     font = pygame.font.SysFont(None, 36)
 
     channel = None
+    if args.audio:
+        try:
+            pygame.mixer.init()
+            channel = pygame.mixer.Channel(0)
+        except pygame.error as e:
+            print(f"tone audio unavailable ({e})")
+
+    drumkit = None
     kick = None
-    try:
-        pygame.mixer.init()
-        kick = make_kick()
-    except pygame.error as e:
-        print(f"audio unavailable ({e}); beat sound disabled")
-    if args.audio and kick is not None:
-        channel = pygame.mixer.Channel(0)
+    if DrumKit is not None:
+        try:
+            drumkit = DrumKit()
+            print(f"drumkit ready (pyo), voices: {', '.join(VOICES)}")
+        except Exception as e:
+            print(f"pyo drumkit failed ({e}); falling back to pygame kick")
+    if drumkit is None:
+        try:
+            pygame.mixer.init(44100, -16, 1, 512)
+            kick = make_kick()
+        except pygame.error as e:
+            print(f"beat audio unavailable ({e})")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", args.port))
@@ -145,13 +170,17 @@ def main():
                         del markers[mid]
 
         m0 = markers.get(BEAT_MARKER_ID)
+        m1 = markers.get(SOUND_MARKER_ID)
+        sel = sound_index(m1["angle"]) if m1 is not None else 0
         if not args.test and m0 is not None:
             rpm = rpm_from_angle(m0["angle"])
             phase += (rpm / 60.0) * dt
             if phase >= 1.0:
                 phase -= 1.0
                 flash = 1.0
-                if kick is not None:
+                if drumkit is not None:
+                    drumkit.trigger(sel)
+                elif kick is not None:
                     kick.play()
         else:
             phase = 0.0
@@ -173,8 +202,16 @@ def main():
                 r, g, b = colorsys.hsv_to_rgb((m["angle"] % 360.0) / 360.0, 1.0, 1.0)
                 color = (int(r * 255 * fade), int(g * 255 * fade), int(b * 255 * fade))
                 pygame.draw.circle(screen, color, (int(m["pos"][0]), int(m["pos"][1])), args.radius)
-                label = font.render(f"id={mid} {m['angle']:.0f}deg", True, (255, 255, 255))
+                if mid == SOUND_MARKER_ID:
+                    text = f"id={mid} {VOICES[sound_index(m['angle'])]} {m['angle']:.0f}deg"
+                else:
+                    text = f"id={mid} {m['angle']:.0f}deg"
+                label = font.render(text, True, (255, 255, 255))
                 screen.blit(label, (int(m["pos"][0]) + args.radius + 8, int(m["pos"][1]) - 12))
+
+        if not args.test and m0 is not None and m1 is not None:
+            pygame.draw.line(screen, (120, 90, 200), (int(m1["pos"][0]), int(m1["pos"][1])),
+                             (int(m0["pos"][0]), int(m0["pos"][1])), 2)
 
         if not args.test and m0 is not None:
             mx, my = m0["pos"]
@@ -207,7 +244,7 @@ def main():
                 age = now - last_msg if last_msg else -1.0
                 beat = ""
                 if m0 is not None:
-                    beat = f"  rpm: {rpm_from_angle(m0['angle']):.0f}"
+                    beat = f"  rpm: {rpm_from_angle(m0['angle']):.0f}  snd: {VOICES[sel]}"
                 status = (f"markers: {len(markers)}  msgs: {msg_count}  "
                           f"last: {age:.1f}s ago  fps: {int(clock.get_fps())}{beat}")
             screen.blit(font.render(status, True, (0, 255, 0)), (16, 16))
@@ -217,6 +254,8 @@ def main():
         clock.tick(60)
 
     pygame.quit()
+    if drumkit is not None:
+        drumkit.shutdown()
 
 
 if __name__ == "__main__":
