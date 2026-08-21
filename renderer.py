@@ -7,6 +7,11 @@ import time
 import numpy as np
 import pygame
 
+RPM_MIN = 30.0
+RPM_MAX = 240.0
+BEAT_MARKER_ID = 0
+CENTER_COLOR = (60, 130, 255)
+
 
 def transform(H, x, y):
     p = np.array([x, y, 1.0])
@@ -22,6 +27,34 @@ def make_tone(freq, rate=44100, dur=0.15):
     t = np.linspace(0.0, dur, int(rate * dur), endpoint=False)
     samples = (np.sin(2 * np.pi * freq * t) * 0.3 * 32767).astype(np.int16)
     return pygame.sndarray.make_sound(samples)
+
+
+def make_kick(rate=44100, dur=0.25):
+    t = np.linspace(0.0, dur, int(rate * dur), endpoint=False)
+    freq = np.linspace(150.0, 50.0, t.size)
+    env = np.exp(-t * 18.0)
+    samples = (np.sin(2 * np.pi * freq * t) * env * 0.5 * 32767).astype(np.int16)
+    return pygame.sndarray.make_sound(samples)
+
+
+def rpm_from_angle(angle):
+    return RPM_MIN + (angle % 360.0) / 360.0 * (RPM_MAX - RPM_MIN)
+
+
+def draw_glow(screen, pos, rgb, radius, intensity=1.0):
+    layers = 8
+    for i in range(layers, 0, -1):
+        f = i / layers
+        r = max(1, int(radius * f))
+        a = intensity * (1.0 - f)
+        color = (int(rgb[0] * a), int(rgb[1] * a), int(rgb[2] * a))
+        pygame.draw.circle(screen, color, pos, r)
+    core = (
+        min(255, int(rgb[0] + (255 - rgb[0]) * 0.6 * intensity)),
+        min(255, int(rgb[1] + (255 - rgb[1]) * 0.6 * intensity)),
+        min(255, int(rgb[2] + (255 - rgb[2]) * 0.6 * intensity)),
+    )
+    pygame.draw.circle(screen, core, pos, max(2, int(radius * 0.18)))
 
 
 def main():
@@ -44,16 +77,20 @@ def main():
         print("no homography file; using identity mapping")
         H = np.eye(3)
 
-    if args.audio:
-        pygame.mixer.pre_init(44100, -16, 1, 512)
+    pygame.mixer.pre_init(44100, -16, 1, 512)
     pygame.init()
     screen = pygame.display.set_mode((args.width, args.height), pygame.FULLSCREEN)
     pygame.mouse.set_visible(False)
     font = pygame.font.SysFont(None, 36)
 
     channel = None
-    if args.audio:
+    kick = None
+    try:
         pygame.mixer.init()
+        kick = make_kick()
+    except pygame.error as e:
+        print(f"audio unavailable ({e}); beat sound disabled")
+    if args.audio and kick is not None:
         channel = pygame.mixer.Channel(0)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -66,6 +103,10 @@ def main():
     msg_count = 0
     last_msg = 0.0
     cur_freq = 0.0
+    center = (args.width / 2.0, args.height / 2.0)
+    phase = 0.0
+    flash = 0.0
+    prev_now = time.monotonic()
     running = True
 
     while running:
@@ -76,6 +117,8 @@ def main():
                 running = False
 
         now = time.monotonic()
+        dt = now - prev_now
+        prev_now = now
 
         if not args.test:
             seen_now = set()
@@ -101,6 +144,19 @@ def main():
                     if markers[mid]["frames_since"] > args.fade_frames:
                         del markers[mid]
 
+        m0 = markers.get(BEAT_MARKER_ID)
+        if not args.test and m0 is not None:
+            rpm = rpm_from_angle(m0["angle"])
+            phase += (rpm / 60.0) * dt
+            if phase >= 1.0:
+                phase -= 1.0
+                flash = 1.0
+                if kick is not None:
+                    kick.play()
+        else:
+            phase = 0.0
+        flash = max(0.0, flash - dt * 4.0)
+
         screen.fill((0, 0, 0))
 
         if args.test:
@@ -119,6 +175,16 @@ def main():
                 pygame.draw.circle(screen, color, (int(m["pos"][0]), int(m["pos"][1])), args.radius)
                 label = font.render(f"id={mid} {m['angle']:.0f}deg", True, (255, 255, 255))
                 screen.blit(label, (int(m["pos"][0]) + args.radius + 8, int(m["pos"][1]) - 12))
+
+        if not args.test and m0 is not None:
+            mx, my = m0["pos"]
+            pygame.draw.line(screen, (40, 80, 160), (int(mx), int(my)),
+                             (int(center[0]), int(center[1])), 2)
+            px = mx + (center[0] - mx) * phase
+            py = my + (center[1] - my) * phase
+            draw_glow(screen, (int(px), int(py)), (120, 180, 255), 26, 0.9)
+
+        draw_glow(screen, (int(center[0]), int(center[1])), CENTER_COLOR, 46, 0.5 + 0.5 * flash)
 
         if channel is not None:
             if markers:
@@ -139,8 +205,11 @@ def main():
                 status = f"TEST MODE (renderer OK)  {int(clock.get_fps())} fps"
             else:
                 age = now - last_msg if last_msg else -1.0
+                beat = ""
+                if m0 is not None:
+                    beat = f"  rpm: {rpm_from_angle(m0['angle']):.0f}"
                 status = (f"markers: {len(markers)}  msgs: {msg_count}  "
-                          f"last: {age:.1f}s ago  fps: {int(clock.get_fps())}")
+                          f"last: {age:.1f}s ago  fps: {int(clock.get_fps())}{beat}")
             screen.blit(font.render(status, True, (0, 255, 0)), (16, 16))
 
         pygame.display.flip()
