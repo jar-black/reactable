@@ -1,5 +1,4 @@
 import argparse
-from collections import deque
 import colorsys
 import json
 import math
@@ -17,11 +16,27 @@ except Exception:
     DrumKit = None
     VOICES = ("kick", "snare", "hihat", "clap", "tom")
 
+
+def load_marker_config(path):
+    defaults = {"beat_marker": 0, "sound_marker": 1}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return {
+            "beat_marker": int(data.get("beat_marker", defaults["beat_marker"])),
+            "sound_marker": int(data.get("sound_marker", defaults["sound_marker"])),
+        }
+    except (OSError, ValueError, TypeError):
+        print(f"marker config {path} unavailable; using defaults {defaults}")
+        return defaults
+
+
 RPM_MIN = 30.0
 RPM_MAX = 240.0
 BEAT_MARKER_ID = 0
 SOUND_MARKER_ID = 1
-POS_HISTORY = 5
+POS_EMA = 0.6
+SIZE_EMA = 0.5
 CENTER_COLOR = (60, 130, 255)
 SIZE_MIN = 30.0
 SIZE_MAX = 150.0
@@ -47,12 +62,17 @@ def make_tone(freq, rate=44100, dur=0.15):
     return pygame.sndarray.make_sound(samples)
 
 
-def make_kick(rate=44100, dur=0.25):
-    t = np.linspace(0.0, dur, int(rate * dur), endpoint=False)
-    freq = np.linspace(150.0, 50.0, t.size)
-    env = np.exp(-t * 18.0)
-    samples = (np.sin(2 * np.pi * freq * t) * env * 0.5 * 32767).astype(np.int16)
-    return pygame.sndarray.make_sound(samples)
+def make_kick(rate=44100, dur=0.5):
+    n = int(rate * dur)
+    t = np.linspace(0.0, dur, n, endpoint=False)
+    freq = 190.0 * np.exp(-t * 4.0) + 38.0
+    phase = 2.0 * np.pi * np.cumsum(freq) / rate
+    body = np.sin(phase) * np.exp(-t * 6.0)
+    click_len = int(rate * 0.008)
+    click = np.zeros(n)
+    click[:click_len] = np.random.randn(click_len) * np.exp(-t[:click_len] * 400.0)
+    samples = (body * 0.6 + click * 0.25) * 32767.0
+    return pygame.sndarray.make_sound(samples.astype(np.int16))
 
 
 def rpm_from_angle(angle):
@@ -132,12 +152,20 @@ def main():
     p.add_argument("--homography", default="homography.npy")
     p.add_argument("--playarea", default="playarea.npy",
                    help="saved play-area rect [x0,y0,x1,y1]; falls back to layout.play_rect()")
+    p.add_argument("--config", default="config.json",
+                   help="JSON file mapping marker ids to roles (beat_marker, sound_marker)")
     p.add_argument("--timeout", type=float, default=0.5,
                    help="seconds a marker must be unseen before it disappears")
     p.add_argument("--test", action="store_true", help="animate a circle, ignore UDP")
     p.add_argument("--audio", action="store_true", help="play a tone pitched by marker angle")
     p.add_argument("--no-debug", action="store_true", help="hide status overlay")
     args = p.parse_args()
+
+    global BEAT_MARKER_ID, SOUND_MARKER_ID
+    roles = load_marker_config(args.config)
+    BEAT_MARKER_ID = roles["beat_marker"]
+    SOUND_MARKER_ID = roles["sound_marker"]
+    print(f"marker roles: beat={BEAT_MARKER_ID}, sound={SOUND_MARKER_ID}")
 
     bg = max(0, min(255, args.background))
     label_color = (0, 0, 0) if bg > 127 else (255, 255, 255)
@@ -240,20 +268,16 @@ def main():
                     orient = 0.0
                 size = min(SIZE_MAX, max(SIZE_MIN, size))
                 if mid in markers:
-                    hist = markers[mid]["history"]
-                    shist = markers[mid]["shistory"]
+                    prev = markers[mid]["pos"]
+                    sx = prev[0] * (1.0 - POS_EMA) + qx * POS_EMA
+                    sy = prev[1] * (1.0 - POS_EMA) + qy * POS_EMA
+                    ss = markers[mid]["size"] * (1.0 - SIZE_EMA) + size * SIZE_EMA
                 else:
-                    hist = deque(maxlen=POS_HISTORY)
-                    shist = deque(maxlen=POS_HISTORY)
-                hist.append((qx, qy))
-                shist.append(size)
-                sx = float(np.median([p[0] for p in hist]))
-                sy = float(np.median([p[1] for p in hist]))
-                ss = float(np.median(shist))
+                    sx, sy = qx, qy
+                    ss = size
                 markers[mid] = {"pos": (sx, sy), "angle": msg["angle"],
                                 "size": ss, "orient": orient,
-                                "last_seen": now,
-                                "history": hist, "shistory": shist}
+                                "last_seen": now}
 
             for mid in list(markers):
                 if now - markers[mid]["last_seen"] > args.timeout:

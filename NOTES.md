@@ -55,15 +55,17 @@ export WAYLAND_DISPLAY=wayland-0
 - **Gotcha 1**: `cv2.VideoCapture(0)` defaults to GStreamer backend which FAILS on this build; must force V4L2: `cv2.VideoCapture(0, cv2.CAP_V4L2)`.
 - **Gotcha 2**: `generateImageMarker` output has NO quiet zone → undetected as-is. Pad with ≥1 cell of white (`make_marker.py` does this).
 - Angle convention: physical CW rotation → angle decreases (0→270→180→90). Full 0–360 covered; invert later if CW color sweep is wanted.
-- Perf (benchmarked 2026-09-09, tracker alone): 1280x720 CLAHE+subpix ≈ 9.8 fps, 1280x720 CLAHE no-subpix ≈ 10.6 fps, **960x540 CLAHE no-subpix ≈ 16.6 fps**, without CLAHE detections collapse (≈0.03/frame) — **CLAHE is mandatory** in this dark scene. Defaults are now 960x540, CLAHE on, subpixel refinement off. With the renderer running, tracker fps is lower (~8–9); renderer now ticks at 30 fps to leave CPU headroom.
+- Perf (benchmarked 2026-09-09, tracker alone): 1280x720 CLAHE+subpix ≈ 9.8 fps, 1280x720 CLAHE no-subpix ≈ 10.6 fps, **960x540 CLAHE no-subpix ≈ 16.6 fps**, without CLAHE detections collapse (≈0.03/frame) — **CLAHE is mandatory** in this dark scene. `run.sh` launches the tracker at **640×360** by default (`TRACKER_SIZE` env) for ~18–19 fps with the renderer running and lower marker latency; CLAHE on, subpixel refinement off. Override with e.g. `TRACKER_SIZE=960x540 ./run.sh` if detection rate drops.
 - Coordinates: `tracker.py` scales detected `(x,y)` from the actual capture size to **1280x720 calibration coords** before sending, so `homography.npy` stays valid at any capture resolution.
 
 ### Run tracker
 
 ```sh
-python3 -u tracker.py            # 960x540, CLAHE, coords scaled to 1280x720 calib -> UDP 7000
+python3 -u tracker.py            # 960x540 default, CLAHE, coords scaled to 1280x720 calib -> UDP 7000
 python3 -u tracker.py --show     # X11 preview window (needs DISPLAY)
 ```
+
+`run.sh` passes `--width/--height` from `TRACKER_SIZE` (default `640x360`) for lower latency.
 
 ## Phase 3 — Camera–projector calibration (dynamic play area)
 
@@ -79,9 +81,10 @@ python3 -u tracker.py --show     # X11 preview window (needs DISPLAY)
 
 ## Phase 4 — Renderer
 
-- `renderer.py`: pygame fullscreen (SDL **wayland** driver) on the projector at 30 fps; binds UDP 7000; applies `homography.npy` to each `(x,y)`; draws a **glowing square** around each physical marker with a clear dark gap between the marker edge and the glow (`SQUARE_INNER/OUTER = 1.4/1.9` × marker size) to avoid interfering with ArUco detection, **rotated to the marker's projected orientation**, colored by `angle → HSV hue`; square size is auto-fit from the tracker's `size` field (clamped 30–150 px, median of the last 5); a marker must be unseen for 0.5 s (`--timeout`) before its glow disappears; position is a median of the last 5 samples.
+- `renderer.py`: pygame fullscreen (SDL **wayland** driver) on the projector at 30 fps; binds UDP 7000; applies `homography.npy` to each `(x,y)`; draws a **glowing square** around each physical marker with a clear dark gap between the marker edge and the glow (`SQUARE_INNER/OUTER = 1.4/1.9` × marker size) to avoid interfering with ArUco detection, **rotated to the marker's projected orientation**, colored by `angle → HSV hue`; square size is auto-fit from the tracker's `size` field (clamped 30–150 px); position and size are smoothed with an exponential moving average (`POS_EMA = 0.6`, `SIZE_EMA = 0.5`) for low latency; a marker must be unseen for 0.5 s (`--timeout`) before its glow disappears.
 - Play area: loaded from `playarea.npy` (falls back to the fixed `play_rect()` when absent); a dim border is drawn around it; markers outside it are hidden (no glow/audio/beat) until they return. Debug overlay shows `inside/total` marker counts.
 - `tracker.py` UDP JSON now includes `size` (mean marker side length scaled to 1280×720 calib coords); renderer falls back to `--radius` if `size` is missing.
+- Marker roles are read from **`config.json`** (`--config`): `beat_marker` drives tempo/RPM, `sound_marker` selects the drum voice by angle. Any other marker id just gets a glow with no audio role. Defaults: `{"beat_marker": 0, "sound_marker": 2}` (marker 1 is currently unused/lost). Falls back to 0/1 if the file is missing or invalid.
 - `--background N` (0–255) turns the projector into a light source for the camera; `run.sh` passes `--background 180` by default (override with `BACKGROUND=0 ./run.sh`).
 - `run.sh`: runs `calibrate.py --auto` first (continues on failure with the existing `homography.npy`/`playarea.npy`), then launches renderer + tracker (sets `XDG_RUNTIME_DIR`/`WAYLAND_DISPLAY`/`SDL_VIDEODRIVER`).
 - pygame/SDL needs `SDL_VIDEODRIVER=wayland` (else it may fall back to X11/XWayland).

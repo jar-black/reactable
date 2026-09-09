@@ -26,7 +26,11 @@ fi
 
 python3 -u renderer.py $AUDIO --background "$BACKGROUND" &
 RPID=$!
-python3 -u tracker.py &
+# Lower capture resolution keeps tracker latency down; coords are still scaled to 1280x720 calib space
+TRACKER_SIZE="${TRACKER_SIZE:-640x360}"
+TW=${TRACKER_SIZE%x*}
+TH=${TRACKER_SIZE#*x}
+python3 -u tracker.py --width "$TW" --height "$TH" &
 TPID=$!
 
 trap 'kill $RPID $TPID 2>/dev/null' EXIT INT TERM

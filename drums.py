@@ -36,15 +36,15 @@ class DrumKit:
 
     def _build(self, name, trig):
         if name == "kick":
-            amp_table = pyo.ExpTable([(0, 0.0), (16, 1.0), (8191, 0.0001)], exp=5.0)
-            freq_table = pyo.LinTable([(0, 150.0), (8191, 45.0)])
-            click_table = pyo.ExpTable([(0, 0.0), (16, 1.0), (8191, 0.0001)], exp=12.0)
-            amp = pyo.TrigEnv(trig, table=amp_table, dur=0.35, mul=0.5)
-            freq = pyo.TrigEnv(trig, table=freq_table, dur=0.35)
+            amp_table = pyo.ExpTable([(0, 0.0), (8, 1.0), (8191, 0.0001)], exp=4.0)
+            freq_table = pyo.LinTable([(0, 190.0), (2048, 90.0), (8191, 38.0)])
+            click_table = pyo.ExpTable([(0, 0.0), (8, 1.0), (8191, 0.0001)], exp=16.0)
+            amp = pyo.TrigEnv(trig, table=amp_table, dur=0.5, mul=0.75)
+            freq = pyo.TrigEnv(trig, table=freq_table, dur=0.5)
             body = pyo.Sine(freq=freq, mul=amp)
             noise = pyo.Noise()
-            click_env = pyo.TrigEnv(trig, table=click_table, dur=0.02, mul=0.15)
-            click = pyo.ButHP(noise, freq=4000, mul=click_env)
+            click_env = pyo.TrigEnv(trig, table=click_table, dur=0.012, mul=0.3)
+            click = pyo.ButHP(noise, freq=6000, mul=click_env)
             out = (body + click).out()
             self._keep(amp_table, freq_table, click_table, amp, freq, body,
                        noise, click_env, click, out)
