@@ -2,11 +2,14 @@ import argparse
 from collections import deque
 import colorsys
 import json
+import math
 import socket
 import time
 
 import numpy as np
 import pygame
+
+import layout
 
 try:
     from drums import DrumKit, VOICES
@@ -20,6 +23,12 @@ BEAT_MARKER_ID = 0
 SOUND_MARKER_ID = 1
 POS_HISTORY = 5
 CENTER_COLOR = (60, 130, 255)
+SIZE_MIN = 30.0
+SIZE_MAX = 150.0
+SQUARE_INNER = 1.4
+SQUARE_OUTER = 1.9
+SQUARE_LAYERS = 6
+PLAY_RECT = layout.play_rect()
 
 
 def transform(H, x, y):
@@ -70,15 +79,59 @@ def draw_glow(screen, pos, rgb, radius, intensity=1.0):
     pygame.draw.circle(screen, core, pos, max(2, int(radius * 0.18)))
 
 
+def draw_square_glow(screen, pos, rgb, size, intensity=1.0, angle=0.0):
+    half = size / 2.0
+    inner = half * SQUARE_INNER
+    outer = half * SQUARE_OUTER
+    side = max(2, int(2 * outer))
+    surf = pygame.Surface((side, side), pygame.SRCALPHA)
+    center = side // 2
+    for i in range(SQUARE_LAYERS, 0, -1):
+        f = i / SQUARE_LAYERS
+        h = inner + (outer - inner) * f
+        a = intensity * (1.0 - f)
+        color = (int(rgb[0]), int(rgb[1]), int(rgb[2]), int(a * 255))
+        rect = pygame.Rect(0, 0, int(2 * h), int(2 * h))
+        rect.center = (center, center)
+        pygame.draw.rect(surf, color, rect)
+    hole = pygame.Rect(0, 0, max(1, int(2 * inner)), max(1, int(2 * inner)))
+    hole.center = (center, center)
+    surf.fill((0, 0, 0, 0), hole)
+    band = (
+        min(255, int(rgb[0] + (255 - rgb[0]) * 0.6 * intensity)),
+        min(255, int(rgb[1] + (255 - rgb[1]) * 0.6 * intensity)),
+        min(255, int(rgb[2] + (255 - rgb[2]) * 0.6 * intensity)),
+        255,
+    )
+    pygame.draw.rect(surf, band, hole, max(2, int(size * 0.04)))
+    if angle:
+        surf = pygame.transform.rotate(surf, -angle)
+    screen.blit(surf, surf.get_rect(center=pos))
+
+
+def inside_play_area(pos):
+    x0, y0, x1, y1 = PLAY_RECT
+    return x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1
+
+
+def draw_play_border(screen, bg, label_color):
+    x0, y0, x1, y1 = PLAY_RECT
+    color = tuple(int(label_color[i] * 0.4 + bg * 0.6) for i in range(3))
+    pygame.draw.rect(screen, color, (x0, y0, x1 - x0, y1 - y0), 3)
+
+
 def main():
-    p = argparse.ArgumentParser(description="Projector renderer (UDP in, circles out)")
+    p = argparse.ArgumentParser(description="Projector renderer (UDP in, glow squares out)")
     p.add_argument("--port", type=int, default=7000)
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
-    p.add_argument("--radius", type=int, default=70)
+    p.add_argument("--radius", type=int, default=70,
+                   help="fallback marker size when tracker sends no size; also test-mode circle radius")
     p.add_argument("--background", type=int, default=0,
                    help="screen background gray level 0-255 (use projector as light source)")
     p.add_argument("--homography", default="homography.npy")
+    p.add_argument("--playarea", default="playarea.npy",
+                   help="saved play-area rect [x0,y0,x1,y1]; falls back to layout.play_rect()")
     p.add_argument("--timeout", type=float, default=0.5,
                    help="seconds a marker must be unseen before it disappears")
     p.add_argument("--test", action="store_true", help="animate a circle, ignore UDP")
@@ -95,6 +148,14 @@ def main():
     except FileNotFoundError:
         print("no homography file; using identity mapping")
         H = np.eye(3)
+
+    global PLAY_RECT
+    try:
+        PLAY_RECT = tuple(float(v) for v in np.load(args.playarea))
+        print(f"loaded {args.playarea}: {PLAY_RECT}")
+    except (FileNotFoundError, ValueError):
+        PLAY_RECT = layout.play_rect()
+        print(f"no {args.playarea}; using default play rect {PLAY_RECT}")
 
     if args.audio:
         pygame.mixer.pre_init(44100, -16, 1, 512)
@@ -167,22 +228,41 @@ def main():
                 last_msg = now
                 mid = msg["id"]
                 qx, qy = transform(H, msg["x"], msg["y"])
+                if msg.get("size", 0) > 0:
+                    ex, ey = transform(H, msg["x"] + msg["size"], msg["y"])
+                    size = math.hypot(ex - qx, ey - qy)
+                    rad = math.radians(msg["angle"])
+                    ox, oy = transform(H, msg["x"] + math.cos(rad) * msg["size"],
+                                       msg["y"] + math.sin(rad) * msg["size"])
+                    orient = math.degrees(math.atan2(oy - qy, ox - qx)) % 90.0
+                else:
+                    size = float(args.radius)
+                    orient = 0.0
+                size = min(SIZE_MAX, max(SIZE_MIN, size))
                 if mid in markers:
                     hist = markers[mid]["history"]
+                    shist = markers[mid]["shistory"]
                 else:
                     hist = deque(maxlen=POS_HISTORY)
+                    shist = deque(maxlen=POS_HISTORY)
                 hist.append((qx, qy))
+                shist.append(size)
                 sx = float(np.median([p[0] for p in hist]))
                 sy = float(np.median([p[1] for p in hist]))
+                ss = float(np.median(shist))
                 markers[mid] = {"pos": (sx, sy), "angle": msg["angle"],
-                                "last_seen": now, "history": hist}
+                                "size": ss, "orient": orient,
+                                "last_seen": now,
+                                "history": hist, "shistory": shist}
 
             for mid in list(markers):
                 if now - markers[mid]["last_seen"] > args.timeout:
                     del markers[mid]
 
-        m0 = markers.get(BEAT_MARKER_ID)
-        m1 = markers.get(SOUND_MARKER_ID)
+        inside_markers = {mid: m for mid, m in markers.items()
+                          if inside_play_area(m["pos"])}
+        m0 = inside_markers.get(BEAT_MARKER_ID)
+        m1 = inside_markers.get(SOUND_MARKER_ID)
         sel = sound_index(m1["angle"]) if m1 is not None else 0
         if not args.test and m0 is not None:
             rpm = rpm_from_angle(m0["angle"])
@@ -200,6 +280,9 @@ def main():
 
         screen.fill((bg, bg, bg))
 
+        if not args.test:
+            draw_play_border(screen, bg, label_color)
+
         if args.test:
             t = now
             cx = args.width / 2 + 400 * np.cos(t * 0.8)
@@ -209,18 +292,20 @@ def main():
             color = (int(r * 255), int(g * 255), int(b * 255))
             pygame.draw.circle(screen, color, (int(cx), int(cy)), args.radius)
         else:
-            for mid, m in markers.items():
+            for mid, m in inside_markers.items():
                 age = now - m["last_seen"]
                 fade = max(0.0, 1.0 - age / args.timeout)
                 r, g, b = colorsys.hsv_to_rgb((m["angle"] % 360.0) / 360.0, 1.0, 1.0)
-                color = (int(r * 255 * fade), int(g * 255 * fade), int(b * 255 * fade))
-                pygame.draw.circle(screen, color, (int(m["pos"][0]), int(m["pos"][1])), args.radius)
+                rgb = (int(r * 255), int(g * 255), int(b * 255))
+                draw_square_glow(screen, (int(m["pos"][0]), int(m["pos"][1])),
+                                 rgb, m["size"], fade, m["orient"])
                 if mid == SOUND_MARKER_ID:
                     text = f"id={mid} {VOICES[sound_index(m['angle'])]} {m['angle']:.0f}deg"
                 else:
                     text = f"id={mid} {m['angle']:.0f}deg"
                 label = font.render(text, True, label_color)
-                screen.blit(label, (int(m["pos"][0]) + args.radius + 8, int(m["pos"][1]) - 12))
+                label_x = int(m["pos"][0]) + int(m["size"] * SQUARE_OUTER / 2) + 8
+                screen.blit(label, (label_x, int(m["pos"][1]) - 12))
 
         if not args.test and m0 is not None and m1 is not None:
             pygame.draw.line(screen, (120, 90, 200), (int(m1["pos"][0]), int(m1["pos"][1])),
@@ -237,8 +322,8 @@ def main():
         draw_glow(screen, (int(center[0]), int(center[1])), CENTER_COLOR, 46, 0.5 + 0.5 * flash)
 
         if channel is not None:
-            if markers:
-                m = max(markers.values(), key=lambda x: x["last_seen"])
+            if inside_markers:
+                m = max(inside_markers.values(), key=lambda x: x["last_seen"])
                 freq = tone_freq(m["angle"])
                 if abs(freq - cur_freq) > 8.0:
                     cur_freq = freq
@@ -258,7 +343,8 @@ def main():
                 beat = ""
                 if m0 is not None:
                     beat = f"  rpm: {rpm_from_angle(m0['angle']):.0f}  snd: {VOICES[sel]}"
-                status = (f"markers: {len(markers)}  msgs: {msg_count}  "
+                status = (f"markers: {len(inside_markers)}/{len(markers)} in play area  "
+                          f"msgs: {msg_count}  "
                           f"last: {age:.1f}s ago  fps: {int(clock.get_fps())}{beat}")
             screen.blit(font.render(status, True, (0, 255, 0)), (16, 16))
 

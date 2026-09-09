@@ -65,28 +65,35 @@ python3 -u tracker.py            # 960x540, CLAHE, coords scaled to 1280x720 cal
 python3 -u tracker.py --show     # X11 preview window (needs DISPLAY)
 ```
 
-## Phase 3 — Camera–projector calibration
+## Phase 3 — Camera–projector calibration (dynamic play area)
 
+- `layout.py` holds projector constants: `PROJ_W/H = 1920/1080`, `CALIB_W/H = 1280/720`, `MARKER_SIZE = 130`, `MARGIN = 160`, a **6×6 grid of 36 calibration markers** `POSITIONS` (ids **4–39**, kept away from puck ids 0–3), `PLAY_MARGIN_CAM = 80`, and the fallback `play_rect()`.
 - `calibrate.py`:
-  - `python3 calibrate.py --pattern` → `calib_pattern.png` (4 ArUco markers at fixed projector coords `POSITIONS`)
-  - project it fullscreen, then `python3 calibrate.py` → detects the 4 projected markers, `cv2.findHomography(camera, projector)` → `homography.npy`
+  - `python3 calibrate.py --pattern` → `calib_pattern.png` (36-marker grid)
+  - `python3 calibrate.py --auto` → projects the grid fullscreen itself (pygame), waits 6 s for exposure, detects **any visible grid markers** (needs ≥4 with enough spread), `cv2.findHomography(camera, projector)` → `homography.npy`; retries 3×, exit code 0/1. This is what `run.sh` runs at startup.
+  - Manual flow still works: project the pattern (Gotcha 3), then `python3 calibrate.py`
+- **Dynamic play area**: after the homography is found, the camera frame (inset by `PLAY_MARGIN_CAM` calib px for marker visibility) is mapped to projector coords, clipped to the projector canvas, and the **largest axis-aligned rectangle inside that visible region** is saved as `playarea.npy`. This works even when the camera only sees part of the projected canvas (e.g. top clipped, or only one half) — the play area becomes the biggest usable region the camera can see.
 - **Gotcha 3**: `mpv` on a still image exits immediately; use `mpv --loop=inf --image-display-duration=inf`.
-- **Gotcha 4**: projector/camera auto-exposure takes a couple seconds to settle — wait ~6 s after the pattern appears before calibrating.
-- Result: homography maps camera px → projector px (1920×1080). Reprojection error 0 px (4-point fit, exact).
+- **Gotcha 4**: projector/camera auto-exposure takes a couple seconds to settle — `--auto` waits ~6 s after the pattern appears.
+- **Gotcha 5**: if the webcam cannot see at least 4 grid markers with enough spread, calibration fails and `run.sh` continues with the existing `homography.npy`/`playarea.npy`. Aim the camera so the projected picture (or the playable part of it) is in view and in focus.
 
 ## Phase 4 — Renderer
 
-- `renderer.py`: pygame fullscreen (SDL **wayland** driver) on the projector at 30 fps; binds UDP 7000; applies `homography.npy` to each `(x,y)`; draws a radius-70 circle colored by `angle → HSV hue`; a marker must be unseen for 0.5 s (`--timeout`) before its circle disappears; position is a median of the last 5 samples.
+- `renderer.py`: pygame fullscreen (SDL **wayland** driver) on the projector at 30 fps; binds UDP 7000; applies `homography.npy` to each `(x,y)`; draws a **glowing square** around each physical marker with a clear dark gap between the marker edge and the glow (`SQUARE_INNER/OUTER = 1.4/1.9` × marker size) to avoid interfering with ArUco detection, **rotated to the marker's projected orientation**, colored by `angle → HSV hue`; square size is auto-fit from the tracker's `size` field (clamped 30–150 px, median of the last 5); a marker must be unseen for 0.5 s (`--timeout`) before its glow disappears; position is a median of the last 5 samples.
+- Play area: loaded from `playarea.npy` (falls back to the fixed `play_rect()` when absent); a dim border is drawn around it; markers outside it are hidden (no glow/audio/beat) until they return. Debug overlay shows `inside/total` marker counts.
+- `tracker.py` UDP JSON now includes `size` (mean marker side length scaled to 1280×720 calib coords); renderer falls back to `--radius` if `size` is missing.
 - `--background N` (0–255) turns the projector into a light source for the camera; `run.sh` passes `--background 180` by default (override with `BACKGROUND=0 ./run.sh`).
-- `run.sh`: launches renderer + tracker together (sets `XDG_RUNTIME_DIR`/`WAYLAND_DISPLAY`/`SDL_VIDEODRIVER`).
+- `run.sh`: runs `calibrate.py --auto` first (continues on failure with the existing `homography.npy`/`playarea.npy`), then launches renderer + tracker (sets `XDG_RUNTIME_DIR`/`WAYLAND_DISPLAY`/`SDL_VIDEODRIVER`).
 - pygame/SDL needs `SDL_VIDEODRIVER=wayland` (else it may fall back to X11/XWayland).
 
 ### Run the full pipeline
 
 ```sh
-./run.sh               # tracker + renderer; Ctrl+C to stop
+./run.sh               # startup calibration, then tracker + renderer; Ctrl+C to stop
 ./run.sh --audio       # + tone pitched by marker angle
 ```
+
+Startup projects the 36-marker grid for ~6 s while the webcam calibrates; if calibration fails it continues with the saved `homography.npy` and `playarea.npy`.
 
 ## Phase 5 — Fiducial marker
 

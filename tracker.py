@@ -7,12 +7,12 @@ import time
 
 import cv2
 
+import layout
 import tracking
 
-
 ANGLE_HISTORY = 8
-CALIB_WIDTH = 1280
-CALIB_HEIGHT = 720
+CALIB_WIDTH = layout.CALIB_W
+CALIB_HEIGHT = layout.CALIB_H
 
 
 def median(values):
@@ -98,6 +98,10 @@ def main():
             angle = math.degrees(math.atan2(dy, dx))
             if angle < 0:
                 angle += 360.0
+            side = 0.0
+            for a, b in ((0, 1), (1, 2), (2, 3), (3, 0)):
+                side += math.hypot(c[b][0] - c[a][0], c[b][1] - c[a][1])
+            side /= 4.0
             if mid not in angle_hist:
                 angle_hist[mid] = deque(maxlen=ANGLE_HISTORY)
             angle_hist[mid].append(angle)
@@ -105,9 +109,12 @@ def main():
             sangle = smooth_angle(angle_hist[mid])
             cxs = cx * scale_x
             cys = cy * scale_y
-            last_markers.append(f"id{mid}@({cxs:.0f},{cys:.0f}) {sangle:.0f}deg")
+            csize = side * (scale_x + scale_y) / 2.0
+            last_markers.append(f"id{mid}@({cxs:.0f},{cys:.0f}) {sangle:.0f}deg "
+                                f"sz{csize:.0f}")
             msg = {"id": mid, "x": float(cxs), "y": float(cys),
-                   "angle": float(sangle), "frame": frames, "t": now}
+                   "angle": float(sangle), "size": float(csize),
+                   "frame": frames, "t": now}
             sock.sendto(json.dumps(msg).encode(), (args.host, args.port))
 
         for mid in list(angle_hist):

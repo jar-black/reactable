@@ -19,6 +19,11 @@ AUDIO=""
 # Projector also acts as a light source for the camera (0 = black, 255 = white)
 BACKGROUND="${BACKGROUND:-180}"
 
+# Startup auto-calibration: project corner markers, detect them, save homography.npy
+if ! python3 -u calibrate.py --auto; then
+    echo "WARN: startup calibration failed; using existing homography.npy if present"
+fi
+
 python3 -u renderer.py $AUDIO --background "$BACKGROUND" &
 RPID=$!
 python3 -u tracker.py &
