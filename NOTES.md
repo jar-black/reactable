@@ -55,12 +55,13 @@ export WAYLAND_DISPLAY=wayland-0
 - **Gotcha 1**: `cv2.VideoCapture(0)` defaults to GStreamer backend which FAILS on this build; must force V4L2: `cv2.VideoCapture(0, cv2.CAP_V4L2)`.
 - **Gotcha 2**: `generateImageMarker` output has NO quiet zone → undetected as-is. Pad with ≥1 cell of white (`make_marker.py` does this).
 - Angle convention: physical CW rotation → angle decreases (0→270→180→90). Full 0–360 covered; invert later if CW color sweep is wanted.
-- Perf: ~18 fps @ 1280x720 MJPG (scene dark; exposure may throttle). Occasional spurious detection (~1/100 frames) — tune `DetectorParameters` later if stray circles appear.
+- Perf (benchmarked 2026-09-09, tracker alone): 1280x720 CLAHE+subpix ≈ 9.8 fps, 1280x720 CLAHE no-subpix ≈ 10.6 fps, **960x540 CLAHE no-subpix ≈ 16.6 fps**, without CLAHE detections collapse (≈0.03/frame) — **CLAHE is mandatory** in this dark scene. Defaults are now 960x540, CLAHE on, subpixel refinement off. With the renderer running, tracker fps is lower (~8–9); renderer now ticks at 30 fps to leave CPU headroom.
+- Coordinates: `tracker.py` scales detected `(x,y)` from the actual capture size to **1280x720 calibration coords** before sending, so `homography.npy` stays valid at any capture resolution.
 
 ### Run tracker
 
 ```sh
-python3 -u tracker.py            # raw camera coords + angle -> UDP 7000 (uses /dev/webcam)
+python3 -u tracker.py            # 960x540, CLAHE, coords scaled to 1280x720 calib -> UDP 7000
 python3 -u tracker.py --show     # X11 preview window (needs DISPLAY)
 ```
 
@@ -75,7 +76,8 @@ python3 -u tracker.py --show     # X11 preview window (needs DISPLAY)
 
 ## Phase 4 — Renderer
 
-- `renderer.py`: pygame fullscreen (SDL **wayland** driver) on the projector; binds UDP 7000; applies `homography.npy` to each `(x,y)`; draws a radius-70 circle colored by `angle → HSV hue`; fades a marker out over ~10 frames when it stops being seen.
+- `renderer.py`: pygame fullscreen (SDL **wayland** driver) on the projector at 30 fps; binds UDP 7000; applies `homography.npy` to each `(x,y)`; draws a radius-70 circle colored by `angle → HSV hue`; a marker must be unseen for 0.5 s (`--timeout`) before its circle disappears; position is a median of the last 5 samples.
+- `--background N` (0–255) turns the projector into a light source for the camera; `run.sh` passes `--background 180` by default (override with `BACKGROUND=0 ./run.sh`).
 - `run.sh`: launches renderer + tracker together (sets `XDG_RUNTIME_DIR`/`WAYLAND_DISPLAY`/`SDL_VIDEODRIVER`).
 - pygame/SDL needs `SDL_VIDEODRIVER=wayland` (else it may fall back to X11/XWayland).
 
@@ -98,8 +100,9 @@ python3 -u tracker.py --show     # X11 preview window (needs DISPLAY)
 
 ## Detection tuning (glossy paper)
 
-- Shared helper `tracking.py`: `make_detector()` (relaxed params: `errorCorrectionRate=0.8`, subpixel corner refinement, `minMarkerPerimeterRate=0.02`, larger adaptive-thresh window) + `preprocess()` (CLAHE).
-- `tracker.py --raw` / edit `tracking.py` to disable CLAHE if it hurts. CLAHE helps with glare but can't be validated without a real marker in frame — tune empirically.
+- Shared helper `tracking.py`: `make_detector()` (relaxed params: `errorCorrectionRate=0.8`, subpixel refinement **off**, `minMarkerPerimeterRate=0.02`, larger adaptive-thresh window) + `preprocess()` (CLAHE).
+- `tracker.py --raw` disables CLAHE — **don't**: benchmark showed detections collapse without CLAHE in this dark scene (0.03/frame vs ~2.9/frame).
+- `tracker.py` smooths each marker's angle at the source: circular median over the last 8 angles (`ANGLE_HISTORY`); UDP now also carries `frame` and `t` fields. Its log fps/rate are rolling 2 s windows.
 - Physical fixes beat software: use **matte** paper (glossy specular highlights wash out cells), diffuse lighting, keep marker flat and large.
 
 > Tuning notes: renderer's black background dims the table → keep marker contrast high. Angle→hue sweeps opposite to physical CW rotation (invert hue if desired).

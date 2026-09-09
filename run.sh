@@ -16,7 +16,10 @@ done
 AUDIO=""
 [ "${1:-}" = "--audio" ] && AUDIO="--audio"
 
-python3 -u renderer.py $AUDIO &
+# Projector also acts as a light source for the camera (0 = black, 255 = white)
+BACKGROUND="${BACKGROUND:-180}"
+
+python3 -u renderer.py $AUDIO --background "$BACKGROUND" &
 RPID=$!
 python3 -u tracker.py &
 TPID=$!

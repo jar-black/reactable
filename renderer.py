@@ -1,4 +1,5 @@
 import argparse
+from collections import deque
 import colorsys
 import json
 import socket
@@ -17,6 +18,7 @@ RPM_MIN = 30.0
 RPM_MAX = 240.0
 BEAT_MARKER_ID = 0
 SOUND_MARKER_ID = 1
+POS_HISTORY = 5
 CENTER_COLOR = (60, 130, 255)
 
 
@@ -74,12 +76,18 @@ def main():
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--radius", type=int, default=70)
+    p.add_argument("--background", type=int, default=0,
+                   help="screen background gray level 0-255 (use projector as light source)")
     p.add_argument("--homography", default="homography.npy")
-    p.add_argument("--fade-frames", type=int, default=10)
+    p.add_argument("--timeout", type=float, default=0.5,
+                   help="seconds a marker must be unseen before it disappears")
     p.add_argument("--test", action="store_true", help="animate a circle, ignore UDP")
     p.add_argument("--audio", action="store_true", help="play a tone pitched by marker angle")
     p.add_argument("--no-debug", action="store_true", help="hide status overlay")
     args = p.parse_args()
+
+    bg = max(0, min(255, args.background))
+    label_color = (0, 0, 0) if bg > 127 else (255, 255, 255)
 
     try:
         H = np.load(args.homography)
@@ -146,7 +154,6 @@ def main():
         prev_now = now
 
         if not args.test:
-            seen_now = set()
             while True:
                 try:
                     data, _addr = sock.recvfrom(65535)
@@ -160,14 +167,19 @@ def main():
                 last_msg = now
                 mid = msg["id"]
                 qx, qy = transform(H, msg["x"], msg["y"])
-                markers[mid] = {"pos": (qx, qy), "angle": msg["angle"], "frames_since": 0}
-                seen_now.add(mid)
+                if mid in markers:
+                    hist = markers[mid]["history"]
+                else:
+                    hist = deque(maxlen=POS_HISTORY)
+                hist.append((qx, qy))
+                sx = float(np.median([p[0] for p in hist]))
+                sy = float(np.median([p[1] for p in hist]))
+                markers[mid] = {"pos": (sx, sy), "angle": msg["angle"],
+                                "last_seen": now, "history": hist}
 
             for mid in list(markers):
-                if mid not in seen_now:
-                    markers[mid]["frames_since"] += 1
-                    if markers[mid]["frames_since"] > args.fade_frames:
-                        del markers[mid]
+                if now - markers[mid]["last_seen"] > args.timeout:
+                    del markers[mid]
 
         m0 = markers.get(BEAT_MARKER_ID)
         m1 = markers.get(SOUND_MARKER_ID)
@@ -186,7 +198,7 @@ def main():
             phase = 0.0
         flash = max(0.0, flash - dt * 4.0)
 
-        screen.fill((0, 0, 0))
+        screen.fill((bg, bg, bg))
 
         if args.test:
             t = now
@@ -198,7 +210,8 @@ def main():
             pygame.draw.circle(screen, color, (int(cx), int(cy)), args.radius)
         else:
             for mid, m in markers.items():
-                fade = max(0.0, 1.0 - m["frames_since"] / args.fade_frames)
+                age = now - m["last_seen"]
+                fade = max(0.0, 1.0 - age / args.timeout)
                 r, g, b = colorsys.hsv_to_rgb((m["angle"] % 360.0) / 360.0, 1.0, 1.0)
                 color = (int(r * 255 * fade), int(g * 255 * fade), int(b * 255 * fade))
                 pygame.draw.circle(screen, color, (int(m["pos"][0]), int(m["pos"][1])), args.radius)
@@ -206,7 +219,7 @@ def main():
                     text = f"id={mid} {VOICES[sound_index(m['angle'])]} {m['angle']:.0f}deg"
                 else:
                     text = f"id={mid} {m['angle']:.0f}deg"
-                label = font.render(text, True, (255, 255, 255))
+                label = font.render(text, True, label_color)
                 screen.blit(label, (int(m["pos"][0]) + args.radius + 8, int(m["pos"][1]) - 12))
 
         if not args.test and m0 is not None and m1 is not None:
@@ -225,7 +238,7 @@ def main():
 
         if channel is not None:
             if markers:
-                m = min(markers.values(), key=lambda x: x["frames_since"])
+                m = max(markers.values(), key=lambda x: x["last_seen"])
                 freq = tone_freq(m["angle"])
                 if abs(freq - cur_freq) > 8.0:
                     cur_freq = freq
@@ -251,7 +264,7 @@ def main():
 
         pygame.display.flip()
         frames += 1
-        clock.tick(60)
+        clock.tick(30)
 
     pygame.quit()
     if drumkit is not None:

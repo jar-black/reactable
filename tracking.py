@@ -25,7 +25,7 @@ def make_detector():
     params.adaptiveThreshConstant = 7
     params.minMarkerPerimeterRate = 0.02
     params.errorCorrectionRate = 0.8
-    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
     return cv2.aruco.ArucoDetector(dictionary, params)
 
 
